@@ -12,13 +12,11 @@ st.set_page_config(
 st.title("⚽ Visualizador de Pases - FIFA World Cup Multi-Edición")
 
 
-# 1. Obtener todas las ediciones/temporadas disponibles de la FIFA World Cup
+# 1. Obtener todas las ediciones de la FIFA World Cup
 @st.cache_data
 def get_world_cup_editions():
     comps = sb.competitions()
-    # Filtrar únicamente la Copa del Mundo Masculina
     wc_comps = comps[comps["competition_name"] == "FIFA World Cup"].copy()
-    # Ordenar por temporada/año de manera descendente
     wc_comps.sort_values(by="season_name", ascending=False, inplace=True)
     return wc_comps
 
@@ -38,46 +36,61 @@ def get_matches_for_edition(competition_id, season_id):
     return matches
 
 
-# 3. Cargar los eventos de pases de un partido
+# 3. Cargar todos los eventos del partido (Pases y Goles)
 @st.cache_data
-def load_match_passes(match_id):
+def load_match_events(match_id):
     events = sb.events(match_id=match_id)
 
-    # Filtrar sólo eventos de tipo Pass
+    # Filtrar pases
     passes = events[events["type"] == "Pass"].copy()
     passes.reset_index(drop=True, inplace=True)
 
-    # Coordenadas (x, y) de inicio y fin del pase
-    passes["x0"] = passes.location.apply(lambda x: x[0])
-    passes["y0"] = passes.location.apply(lambda x: x[1])
-    passes["x1"] = passes.pass_end_location.apply(lambda x: x[0])
-    passes["y1"] = passes.pass_end_location.apply(lambda x: x[1])
+    # Coordenadas (x, y) del pase
+    passes["x0"] = passes.location.apply(
+        lambda x: x[0] if isinstance(x, list) else None
+    )
+    passes["y0"] = passes.location.apply(
+        lambda x: x[1] if isinstance(x, list) else None
+    )
+    passes["x1"] = passes.pass_end_location.apply(
+        lambda x: x[0] if isinstance(x, list) else None
+    )
+    passes["y1"] = passes.pass_end_location.apply(
+        lambda x: x[1] if isinstance(x, list) else None
+    )
 
-    return passes
+    # Filtrar eventos de gol (Tiros que terminaron en gol o autogoles)
+    goals = events[
+        (
+            (events["type"] == "Shot")
+            & (events["shot_outcome"].astype(str) == "Goal")
+        )
+        | (events["type"] == "Own Goal")
+    ].copy()
+
+    return passes, goals
 
 
-# --- Carga inicial de ediciones ---
+# --- Carga inicial de datos ---
 editions_df = get_world_cup_editions()
 
-# --- Barra lateral para filtros en cascada ---
+# --- Barra lateral ---
 st.sidebar.header("Filtros del Torneo")
 
-# 1. Selector de Edición / Año del Mundial
+# Selector de Año/Edición
 selected_season = st.sidebar.selectbox(
     "Selecciona la Edición / Año:", editions_df["season_name"].tolist()
 )
 
-# Extraer competition_id y season_id elegidos
 selected_edition_row = editions_df[
     editions_df["season_name"] == selected_season
 ].iloc[0]
 comp_id = int(selected_edition_row["competition_id"])
 seas_id = int(selected_edition_row["season_id"])
 
-# 2. Cargar partidos de la edición seleccionada
+# Selector de Selección y Partido
 matches_df = get_matches_for_edition(comp_id, seas_id)
 
-# 3. Selector de Selección / Equipo
 teams = sorted(
     list(
         set(
@@ -87,27 +100,26 @@ teams = sorted(
 )
 selected_team = st.sidebar.selectbox("Selecciona una Selección:", teams)
 
-# Filtrar partidos donde participa el equipo seleccionado
 team_matches = matches_df[
     (matches_df["home_team"] == selected_team)
     | (matches_df["away_team"] == selected_team)
 ]
 
-# 4. Selector del Partido específico
 match_selected_label = st.sidebar.selectbox(
     "Selecciona el Partido:", team_matches["match_label"].tolist()
 )
 
-match_id = team_matches[team_matches["match_label"] == match_selected_label][
-    "match_id"
-].values[0]
+match_row = team_matches[
+    team_matches["match_label"] == match_selected_label
+].iloc[0]
+match_id = match_row["match_id"]
+home_team = match_row["home_team"]
+away_team = match_row["away_team"]
 
-# --- Cargar datos del partido seleccionado ---
-passes_df = load_match_passes(match_id)
+# Cargar pases y goles del partido
+passes_df, goals_df = load_match_events(match_id)
 
-st.subheader(f"Mundial {selected_season} | {match_selected_label}")
-
-# Selector de minuto mediante Slider
+# --- Slider de Minuto ---
 min_minute = int(passes_df["minute"].min())
 max_minute = int(passes_df["minute"].max())
 
@@ -119,10 +131,42 @@ minuto_seleccionado = st.slider(
     step=1,
 )
 
-# Filtrar pases por el minuto seleccionado
+# --- Cálculo del Marcador al Minuto Seleccionado ---
+# Filtrar goles anotados antes o durante el minuto actual
+goals_until_minute = goals_df[goals_df["minute"] <= minuto_seleccionado]
+
+# Asignar goles según el equipo correspondiente
+home_score = 0
+away_score = 0
+
+for _, goal in goals_until_minute.iterrows():
+    team_event = goal["team"]
+    is_own_goal = goal["type"] == "Own Goal"
+
+    if not is_own_goal:
+        if team_event == home_team:
+            home_score += 1
+        elif team_event == away_team:
+            away_score += 1
+    else:
+        # En caso de autogol, se le acredita al equipo contrario
+        if team_event == home_team:
+            away_score += 1
+        elif team_event == away_team:
+            home_score += 1
+
+# --- Vista del Marcador Dinámico ---
+st.markdown(
+    f"<h2 style='text-align: center;'>{home_team} {home_score} - {away_score} {away_team}</h2>",
+    unsafe_allow_html=True,
+)
+st.caption(
+    f"Marcador acumulado al **minuto {minuto_seleccionado}** (Mundial {selected_season})"
+)
+
+# --- Visualización de la Cancha ---
 data_minuto = passes_df[passes_df["minute"] == minuto_seleccionado]
 
-# Dibujar la cancha con mplsoccer
 pitch = Pitch(pitch_color="grass", line_color="white", stripe=True)
 fig, ax = pitch.draw(figsize=(10, 6))
 
@@ -143,7 +187,7 @@ else:
 
 st.pyplot(fig)
 
-# Detalles adicionales de los pases
+# Tabla de pases
 with st.expander("Ver detalles de los pases en este minuto"):
     st.dataframe(
         data_minuto[
