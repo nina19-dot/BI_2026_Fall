@@ -7,37 +7,47 @@ from statsbombpy import sb
 
 # Configuración de la página
 st.set_page_config(
-    page_title="Visualizador de Pases - FIFA World Cup 2022", layout="wide"
+    page_title="Visualizador de Pases - FIFA World Cup", layout="wide"
 )
-st.title("⚽ Visualizador de Pases - FIFA World Cup 2022")
+st.title("⚽ Visualizador de Pases - FIFA World Cup Multi-Edición")
 
 
-# 1. Obtener partidos de la World Cup 2022 (competition_id=43, season_id=106)
+# 1. Obtener todas las ediciones/temporadas disponibles de la FIFA World Cup
 @st.cache_data
-def get_world_cup_matches():
-    matches = sb.matches(competition_id=43, season_id=106)
-    # Crear una etiqueta legible para cada partido
+def get_world_cup_editions():
+    comps = sb.competitions()
+    # Filtrar únicamente la Copa del Mundo Masculina
+    wc_comps = comps[comps["competition_name"] == "FIFA World Cup"].copy()
+    # Ordenar por temporada/año de manera descendente
+    wc_comps.sort_values(by="season_name", ascending=False, inplace=True)
+    return wc_comps
+
+
+# 2. Obtener los partidos de una edición específica
+@st.cache_data
+def get_matches_for_edition(competition_id, season_id):
+    matches = sb.matches(competition_id=competition_id, season_id=season_id)
     matches["match_label"] = (
         matches["home_team"]
         + " vs "
         + matches["away_team"]
-        + " (Fase: "
+        + " ("
         + matches["competition_stage"].astype(str)
         + ")"
     )
     return matches
 
 
-# 2. Cargar eventos de un partido específico
+# 3. Cargar los eventos de pases de un partido
 @st.cache_data
 def load_match_passes(match_id):
     events = sb.events(match_id=match_id)
 
-    # Filtrar solo eventos de tipo Pass
+    # Filtrar sólo eventos de tipo Pass
     passes = events[events["type"] == "Pass"].copy()
     passes.reset_index(drop=True, inplace=True)
 
-    # Extracción de coordenadas (x, y)
+    # Coordenadas (x, y) de inicio y fin del pase
     passes["x0"] = passes.location.apply(lambda x: x[0])
     passes["y0"] = passes.location.apply(lambda x: x[1])
     passes["x1"] = passes.pass_end_location.apply(lambda x: x[0])
@@ -46,13 +56,28 @@ def load_match_passes(match_id):
     return passes
 
 
-# Cargar listado de partidos
-matches_df = get_world_cup_matches()
+# --- Carga inicial de ediciones ---
+editions_df = get_world_cup_editions()
 
-# --- Barra lateral para la selección del partido ---
-st.sidebar.header("Selección de Partido")
+# --- Barra lateral para filtros en cascada ---
+st.sidebar.header("Filtros del Torneo")
 
-# Lista de selecciones ordenadas alfabéticamente
+# 1. Selector de Edición / Año del Mundial
+selected_season = st.sidebar.selectbox(
+    "Selecciona la Edición / Año:", editions_df["season_name"].tolist()
+)
+
+# Extraer competition_id y season_id elegidos
+selected_edition_row = editions_df[
+    editions_df["season_name"] == selected_season
+].iloc[0]
+comp_id = int(selected_edition_row["competition_id"])
+seas_id = int(selected_edition_row["season_id"])
+
+# 2. Cargar partidos de la edición seleccionada
+matches_df = get_matches_for_edition(comp_id, seas_id)
+
+# 3. Selector de Selección / Equipo
 teams = sorted(
     list(
         set(
@@ -62,18 +87,17 @@ teams = sorted(
 )
 selected_team = st.sidebar.selectbox("Selecciona una Selección:", teams)
 
-# Filtrar partidos donde juegue la selección elegida
+# Filtrar partidos donde participa el equipo seleccionado
 team_matches = matches_df[
     (matches_df["home_team"] == selected_team)
     | (matches_df["away_team"] == selected_team)
 ]
 
-# Selector de partido específico
+# 4. Selector del Partido específico
 match_selected_label = st.sidebar.selectbox(
     "Selecciona el Partido:", team_matches["match_label"].tolist()
 )
 
-# Obtener el ID del partido seleccionado
 match_id = team_matches[team_matches["match_label"] == match_selected_label][
     "match_id"
 ].values[0]
@@ -81,7 +105,7 @@ match_id = team_matches[team_matches["match_label"] == match_selected_label][
 # --- Cargar datos del partido seleccionado ---
 passes_df = load_match_passes(match_id)
 
-st.subheader(f"Partido: {match_selected_label}")
+st.subheader(f"Mundial {selected_season} | {match_selected_label}")
 
 # Selector de minuto mediante Slider
 min_minute = int(passes_df["minute"].min())
@@ -98,7 +122,7 @@ minuto_seleccionado = st.slider(
 # Filtrar pases por el minuto seleccionado
 data_minuto = passes_df[passes_df["minute"] == minuto_seleccionado]
 
-# Dibujar la cancha
+# Dibujar la cancha con mplsoccer
 pitch = Pitch(pitch_color="grass", line_color="white", stripe=True)
 fig, ax = pitch.draw(figsize=(10, 6))
 
@@ -119,7 +143,7 @@ else:
 
 st.pyplot(fig)
 
-# Tabla opcional con los detalles
+# Detalles adicionales de los pases
 with st.expander("Ver detalles de los pases en este minuto"):
     st.dataframe(
         data_minuto[
